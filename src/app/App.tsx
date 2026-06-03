@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { sendControl } from "./lib/firebase";
 
 type BtnId =
   | "cross" | "circle" | "square" | "triangle"
-  | "l1" | "l2" | "r1" | "r2"
   | "select" | "start" | "analog"
   | "ls";
 
 const KEY_MAP: Record<string, BtnId> = {
   z: "cross", x: "circle", a: "square", s: "triangle",
-  q: "l1", "1": "l2", e: "r1", "3": "r2",
   Backspace: "select", Enter: "start",
 };
 
@@ -116,59 +115,22 @@ function FaceBtn({ id, pressed, press, release }: { id: BtnId; pressed: Set<BtnI
   );
 }
 
-// D-Pad direction button
-
-// Shoulder / Trigger buttons
-function ShoulderBtn({ id, pressed, press, release, label, side }: {
-  id: BtnId; pressed: Set<BtnId>; press: (id: BtnId) => void; release: (id: BtnId) => void;
-  label: string; side: "l" | "r";
-}) {
-  const active = pressed.has(id);
-  const isL2R2 = label.includes("2");
-  return (
-    <PressBtn id={id} pressed={pressed} press={press} release={release}
-      style={{
-        width: "100%",
-        height: isL2R2 ? 38 : 32,
-        borderRadius: isL2R2
-          ? (side === "l" ? "12px 4px 4px 12px" : "4px 12px 12px 4px")
-          : 8,
-        background: active
-          ? "rgba(148,163,184,0.2)"
-          : "rgba(255,255,255,0.05)",
-        border: `1.5px solid ${active ? "rgba(148,163,184,0.5)" : "rgba(255,255,255,0.08)"}`,
-        color: active ? "#e2e8f0" : "rgba(255,255,255,0.4)",
-        fontSize: 11,
-        fontWeight: 700,
-        letterSpacing: 1,
-        cursor: "pointer",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        boxShadow: active ? "0 0 14px rgba(148,163,184,0.25)" : "none",
-        transform: active ? "scale(0.96)" : "scale(1)",
-        transition: "all 0.08s ease",
-        userSelect: "none",
-        WebkitTapHighlightColor: "transparent",
-        backdropFilter: "blur(4px)",
-      }}
-    >
-      {label}
-    </PressBtn>
-  );
-}
-
 // Analog stick
-function AnalogStick({ id, label, pressed, press, release }: {
+function AnalogStick({ id, label, pressed, press, release, onMove }: {
   id: BtnId; label: string;
   pressed: Set<BtnId>; press: (id: BtnId) => void; release: (id: BtnId) => void;
+  onMove: (x: number, y: number) => void;
 }) {
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const dragging = useRef(false);
+  const activeTouchId = useRef<number | null>(null);
   const origin = useRef({ x: 0, y: 0 });
   const MAX = 20;
   const active = pressed.has(id);
 
-  const startDrag = (cx: number, cy: number) => {
+  const startDrag = (cx: number, cy: number, touchId: number | null = null) => {
     dragging.current = true;
+    activeTouchId.current = touchId;
     origin.current = { x: cx, y: cy };
     press(id);
   };
@@ -177,26 +139,52 @@ function AnalogStick({ id, label, pressed, press, release }: {
     const dx = Math.max(-MAX, Math.min(MAX, cx - origin.current.x));
     const dy = Math.max(-MAX, Math.min(MAX, cy - origin.current.y));
     setPos({ x: dx, y: dy });
-  }, []);
+    onMove(Math.round((dx / MAX) * 100), Math.round((dy / MAX) * 100));
+  }, [onMove]);
   const endDrag = useCallback(() => {
     dragging.current = false;
+    activeTouchId.current = null;
     setPos({ x: 0, y: 0 });
+    onMove(0, 0);
     release(id);
-  }, [id, release]);
+  }, [id, onMove, release]);
 
   useEffect(() => {
     const mm = (e: MouseEvent) => moveDrag(e.clientX, e.clientY);
     const mu = () => endDrag();
-    const tm = (e: TouchEvent) => { if (e.touches[0]) moveDrag(e.touches[0].clientX, e.touches[0].clientY); };
+    const tm = (e: TouchEvent) => {
+      if (activeTouchId.current !== null) {
+        for (let i = 0; i < e.touches.length; i++) {
+          if (e.touches[i].identifier === activeTouchId.current) {
+            moveDrag(e.touches[i].clientX, e.touches[i].clientY);
+            break;
+          }
+        }
+      }
+    };
+    const tu = (e: TouchEvent) => {
+      if (activeTouchId.current !== null) {
+        let touchEnded = false;
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          if (e.changedTouches[i].identifier === activeTouchId.current) {
+            touchEnded = true;
+            break;
+          }
+        }
+        if (touchEnded) {
+          endDrag();
+        }
+      }
+    };
     window.addEventListener("mousemove", mm);
     window.addEventListener("mouseup", mu);
     window.addEventListener("touchmove", tm, { passive: true });
-    window.addEventListener("touchend", mu);
+    window.addEventListener("touchend", tu);
     return () => {
       window.removeEventListener("mousemove", mm);
       window.removeEventListener("mouseup", mu);
       window.removeEventListener("touchmove", tm);
-      window.removeEventListener("touchend", mu);
+      window.removeEventListener("touchend", tu);
     };
   }, [moveDrag, endDrag]);
 
@@ -217,7 +205,13 @@ function AnalogStick({ id, label, pressed, press, release }: {
           transition: "border-color 0.1s, box-shadow 0.1s",
         }}
         onMouseDown={e => startDrag(e.clientX, e.clientY)}
-        onTouchStart={e => { e.preventDefault(); if (e.touches[0]) startDrag(e.touches[0].clientX, e.touches[0].clientY); }}
+        onTouchStart={e => {
+          e.preventDefault();
+          const touch = e.changedTouches[0];
+          if (touch) {
+            startDrag(touch.clientX, touch.clientY, touch.identifier);
+          }
+        }}
       >
         {/* crosshair guide */}
         <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
@@ -300,31 +294,45 @@ function Panel({ children, style }: { children: React.ReactNode; style?: React.C
   );
 }
 
-const LOG_MAX = 10;
-const LABEL_MAP: Record<BtnId, string> = {
-  cross: "✕ Cross", circle: "○ Circle", square: "□ Square", triangle: "△ Triangle",
-  l1: "L1", l2: "L2", r1: "R1", r2: "R2",
-  select: "SELECT", start: "START", analog: "ANALOG",
-  ls: "Analog",
-};
-const COLOR_MAP: Record<string, string> = {
-  cross: "#60a5fa", circle: "#f87171", square: "#e879f9", triangle: "#4ade80",
-};
-
 export default function App() {
   const { pressed, press, release } = useButtons();
-  const [log, setLog] = useState<{ id: BtnId; ts: string }[]>([]);
+  const [joystick, setJoystick] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
-    pressed.forEach(id => {
-      setLog(prev => {
-        if (prev[0]?.id === id) return prev;
-        const d = new Date();
-        const ts = `${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}:${d.getSeconds().toString().padStart(2,"0")}`;
-        return [{ id, ts }, ...prev].slice(0, LOG_MAX);
-      });
+    // Disable scrolling on body to prevent page movement/pull-to-refresh on mobile
+    document.body.style.overflow = "hidden";
+    document.body.style.touchAction = "none";
+    document.body.style.overscrollBehavior = "none";
+
+    return () => {
+      document.body.style.overflow = "";
+      document.body.style.touchAction = "";
+      document.body.style.overscrollBehavior = "";
+    };
+  }, []);
+
+  useEffect(() => {
+    const snapshot = {
+      button_cross_gas: pressed.has("cross"),
+      button_circle: pressed.has("circle"),
+      button_square: pressed.has("square"),
+      button_triangle: pressed.has("triangle"),
+      button_select: pressed.has("select"),
+      button_start: pressed.has("start"),
+      button_analog: pressed.has("analog"),
+      joystick_x: joystick.x,
+      joystick_y: joystick.y,
+      marker_gps: pressed.has("triangle")
+        ? "ALERT"
+        : pressed.has("circle")
+          ? "SAFE"
+          : null,
+    };
+
+    void sendControl(snapshot).catch(error => {
+      console.error("Failed to sync control state to Firebase", error);
     });
-  }, [pressed]);
+  }, [pressed, joystick]);
 
   const CenterBtn = ({ id, label }: { id: BtnId; label: string }) => {
     const active = pressed.has(id);
@@ -355,15 +363,20 @@ export default function App() {
   return (
     <div
       style={{
-        minHeight: "100vh",
+        position: "fixed",
+        inset: 0,
+        width: "100%",
+        height: "100%",
+        overflow: "hidden",
         background: "linear-gradient(135deg, #080810 0%, #0f0f1c 50%, #080810 100%)",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: "32px 16px",
-        gap: 24,
+        padding: "16px",
+        gap: 16,
         fontFamily: "system-ui, -apple-system, sans-serif",
+        touchAction: "none",
       }}
     >
       {/* Header */}
@@ -380,37 +393,19 @@ export default function App() {
 
       {/* Controller Layout */}
       <div style={{ width: "100%", maxWidth: 640, display: "flex", flexDirection: "column", gap: 10 }}>
-
-        {/* Row 1 — Triggers L2 / R2 */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <Panel style={{ padding: "14px 18px" }}>
-            <SectionLabel>Trigger</SectionLabel>
-            <ShoulderBtn id="l2" pressed={pressed} press={press} release={release} label="L2" side="l" />
-          </Panel>
-          <Panel style={{ padding: "14px 18px" }}>
-            <SectionLabel>Trigger</SectionLabel>
-            <ShoulderBtn id="r2" pressed={pressed} press={press} release={release} label="R2" side="r" />
-          </Panel>
-        </div>
-
-        {/* Row 2 — L1 / R1 */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <Panel style={{ padding: "14px 18px" }}>
-            <SectionLabel>Bumper</SectionLabel>
-            <ShoulderBtn id="l1" pressed={pressed} press={press} release={release} label="L1" side="l" />
-          </Panel>
-          <Panel style={{ padding: "14px 18px" }}>
-            <SectionLabel>Bumper</SectionLabel>
-            <ShoulderBtn id="r1" pressed={pressed} press={press} release={release} label="R1" side="r" />
-          </Panel>
-        </div>
-
-        {/* Row 3 — Analog / Center / Face */}
+        {/* Row 1 — Analog / Center / Face */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 10, alignItems: "stretch" }}>
           {/* Analog Stick */}
           <Panel style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
             <SectionLabel>Analog</SectionLabel>
-            <AnalogStick id="ls" label="" pressed={pressed} press={press} release={release} />
+            <AnalogStick
+              id="ls"
+              label=""
+              pressed={pressed}
+              press={press}
+              release={release}
+              onMove={(x, y) => setJoystick({ x: -x, y: -y })}
+            />
           </Panel>
 
           {/* Center */}
@@ -463,37 +458,10 @@ export default function App() {
           </Panel>
         </div>
 
-        {/* Row 4 — Input log */}
-        <Panel style={{ padding: "16px 20px" }}>
-          <SectionLabel>Input Log</SectionLabel>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 28 }}>
-            {log.length === 0 && (
-              <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 11, fontStyle: "italic" }}>Tekan tombol apapun...</span>
-            )}
-            {log.map((e, i) => {
-              const color = COLOR_MAP[e.id] ?? "rgba(148,163,184,0.9)";
-              return (
-                <div key={i} style={{
-                  display: "flex", alignItems: "center", gap: 5,
-                  background: "rgba(255,255,255,0.04)",
-                  border: `1px solid ${color}33`,
-                  borderRadius: 8,
-                  padding: "3px 10px",
-                  opacity: Math.max(0.3, 1 - i * 0.08),
-                }}>
-                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: color, flexShrink: 0 }} />
-                  <span style={{ color: color, fontSize: 11, fontWeight: 600 }}>{LABEL_MAP[e.id]}</span>
-                  <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 10, fontFamily: "monospace" }}>{e.ts}</span>
-                </div>
-              );
-            })}
-          </div>
-        </Panel>
-
         {/* Keyboard hint */}
         <div style={{ textAlign: "center" }}>
           <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 10, letterSpacing: 1 }}>
-            Keyboard: Z=✕ &nbsp;·&nbsp; X=○ &nbsp;·&nbsp; A=□ &nbsp;·&nbsp; S=△ &nbsp;·&nbsp; Q=L1 &nbsp;·&nbsp; E=R1 &nbsp;·&nbsp; 1=L2 &nbsp;·&nbsp; 3=R2
+            Keyboard: Z=✕ &nbsp;·&nbsp; X=○ &nbsp;·&nbsp; A=□ &nbsp;·&nbsp; S=△
           </span>
         </div>
       </div>
