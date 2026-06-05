@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { sendControl } from "./lib/firebase";
+import { sendControl, initializeZones } from "./lib/firebase";
 
 type BtnId =
   | "cross" | "circle" | "square" | "triangle"
@@ -90,14 +90,14 @@ function FaceBtn({ id, pressed, press, release }: { id: BtnId; pressed: Set<BtnI
   return (
     <PressBtn id={id} pressed={pressed} press={press} release={release}
       style={{
-        width: 56, height: 56,
+        width: 44, height: 44,
         borderRadius: "50%",
         border: `2px solid ${active ? meta.color : meta.color + "55"}`,
         background: active
           ? `radial-gradient(circle at 40% 35%, ${meta.color}55, ${meta.color}22)`
           : "rgba(255,255,255,0.04)",
         color: meta.color,
-        fontSize: 20,
+        fontSize: 16,
         fontWeight: 700,
         cursor: "pointer",
         display: "flex", alignItems: "center", justifyContent: "center",
@@ -125,7 +125,8 @@ function AnalogStick({ id, label, pressed, press, release, onMove }: {
   const dragging = useRef(false);
   const activeTouchId = useRef<number | null>(null);
   const origin = useRef({ x: 0, y: 0 });
-  const MAX = 20;
+  const MAX = 35;
+  const DEADZONE = 3;
   const active = pressed.has(id);
 
   const startDrag = (cx: number, cy: number, touchId: number | null = null) => {
@@ -136,8 +137,17 @@ function AnalogStick({ id, label, pressed, press, release, onMove }: {
   };
   const moveDrag = useCallback((cx: number, cy: number) => {
     if (!dragging.current) return;
-    const dx = Math.max(-MAX, Math.min(MAX, cx - origin.current.x));
-    const dy = Math.max(-MAX, Math.min(MAX, cy - origin.current.y));
+    let dx = cx - origin.current.x;
+    let dy = cy - origin.current.y;
+    
+    // Apply deadzone
+    if (Math.abs(dx) < DEADZONE) dx = 0;
+    if (Math.abs(dy) < DEADZONE) dy = 0;
+    
+    // Clamp to MAX range
+    dx = Math.max(-MAX, Math.min(MAX, dx));
+    dy = Math.max(-MAX, Math.min(MAX, dy));
+    
     setPos({ x: dx, y: dy });
     onMove(Math.round((dx / MAX) * 100), Math.round((dy / MAX) * 100));
   }, [onMove]);
@@ -191,7 +201,7 @@ function AnalogStick({ id, label, pressed, press, release, onMove }: {
   const pct = { x: (pos.x / MAX) * 100, y: (pos.y / MAX) * 100 };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
       <div
         style={{
           position: "relative",
@@ -221,14 +231,14 @@ function AnalogStick({ id, label, pressed, press, release, onMove }: {
         {/* nub */}
         <div
           style={{
-            width: 48, height: 48,
+            width: 45, height: 45,
             borderRadius: "50%",
             background: active
               ? "radial-gradient(circle at 40% 35%, rgba(148,163,184,0.4), rgba(100,116,139,0.3))"
               : "radial-gradient(circle at 40% 35%, rgba(255,255,255,0.12), rgba(255,255,255,0.04))",
             border: `1.5px solid ${active ? "rgba(148,163,184,0.5)" : "rgba(255,255,255,0.12)"}`,
             transform: `translate(${pos.x}px, ${pos.y}px)`,
-            transition: dragging.current ? "none" : "transform 0.15s cubic-bezier(0.34,1.56,0.64,1)",
+            transition: dragging.current ? "none" : "transform 0.08s ease-out",
             display: "flex", alignItems: "center", justifyContent: "center",
             boxShadow: active ? "0 0 12px rgba(148,163,184,0.3)" : "none",
           }}
@@ -273,7 +283,7 @@ function AnalogStick({ id, label, pressed, press, release, onMove }: {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 9, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
+    <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 8, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>
       {children}
     </div>
   );
@@ -284,9 +294,11 @@ function Panel({ children, style }: { children: React.ReactNode; style?: React.C
     <div style={{
       background: "rgba(255,255,255,0.03)",
       border: "1px solid rgba(255,255,255,0.07)",
-      borderRadius: 20,
-      padding: 20,
+      borderRadius: 16,
+      padding: 12,
       backdropFilter: "blur(12px)",
+      minHeight: 0,
+      overflow: "hidden",
       ...style,
     }}>
       {children}
@@ -297,12 +309,21 @@ function Panel({ children, style }: { children: React.ReactNode; style?: React.C
 export default function App() {
   const { pressed, press, release } = useButtons();
   const [joystick, setJoystick] = useState({ x: 0, y: 0 });
+  const [pwmSpeed, setPwmSpeed] = useState(0);
+
+  const increasePwm = () => setPwmSpeed(prev => Math.min(prev + 10, 255));
+  const decreasePwm = () => setPwmSpeed(prev => Math.max(prev - 10, 0));
 
   useEffect(() => {
     // Disable scrolling on body to prevent page movement/pull-to-refresh on mobile
     document.body.style.overflow = "hidden";
     document.body.style.touchAction = "none";
     document.body.style.overscrollBehavior = "none";
+
+    // Initialize zones in database
+    void initializeZones().catch(error => {
+      console.error("Failed to initialize zones", error);
+    });
 
     return () => {
       document.body.style.overflow = "";
@@ -322,31 +343,29 @@ export default function App() {
       button_analog: pressed.has("analog"),
       joystick_x: joystick.x,
       joystick_y: joystick.y,
-      marker_gps: pressed.has("triangle")
-        ? "ALERT"
-        : pressed.has("circle")
-          ? "SAFE"
-          : null,
+      zone_triangle_safe: pressed.has("triangle") ? "SAFE" : null,
+      zone_circle_danger: pressed.has("circle") ? "DANGER" : null,
+      pwm_speed: pwmSpeed,
     };
 
     void sendControl(snapshot).catch(error => {
       console.error("Failed to sync control state to Firebase", error);
     });
-  }, [pressed, joystick]);
+  }, [pressed, joystick, pwmSpeed]);
 
   const CenterBtn = ({ id, label }: { id: BtnId; label: string }) => {
     const active = pressed.has(id);
     return (
       <PressBtn id={id} pressed={pressed} press={press} release={release}
         style={{
-          padding: "5px 14px",
-          borderRadius: 20,
+          padding: "4px 10px",
+          borderRadius: 16,
           background: active ? "rgba(148,163,184,0.2)" : "rgba(255,255,255,0.04)",
           border: `1px solid ${active ? "rgba(148,163,184,0.5)" : "rgba(255,255,255,0.1)"}`,
           color: active ? "#e2e8f0" : "rgba(255,255,255,0.35)",
-          fontSize: 10,
+          fontSize: 8,
           fontWeight: 700,
-          letterSpacing: 1,
+          letterSpacing: 0.5,
           cursor: "pointer",
           boxShadow: active ? "0 0 10px rgba(148,163,184,0.2)" : "none",
           transform: active ? "scale(0.95)" : "scale(1)",
@@ -373,30 +392,30 @@ export default function App() {
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: "16px",
-        gap: 16,
+        padding: "8px",
+        gap: 8,
         fontFamily: "system-ui, -apple-system, sans-serif",
         touchAction: "none",
       }}
     >
       {/* Header */}
-      <div style={{ textAlign: "center" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 6 }}>
-          <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#4ade80", boxShadow: "0 0 8px #4ade80" }} />
-          <span style={{ color: "rgba(255,255,255,0.8)", fontSize: 13, fontWeight: 700, letterSpacing: 3 }}>
+      <div style={{ textAlign: "center", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 3 }}>
+          <div style={{ width: 4, height: 4, borderRadius: "50%", background: "#4ade80", boxShadow: "0 0 8px #4ade80" }} />
+          <span style={{ color: "rgba(255,255,255,0.8)", fontSize: 11, fontWeight: 700, letterSpacing: 2 }}>
             PS2 CONTROLLER
           </span>
-          <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#4ade80", boxShadow: "0 0 8px #4ade80" }} />
+          <div style={{ width: 4, height: 4, borderRadius: "50%", background: "#4ade80", boxShadow: "0 0 8px #4ade80" }} />
         </div>
-        <p style={{ color: "rgba(255,255,255,0.2)", fontSize: 11, letterSpacing: 1 }}>DualShock 2 — Interactive Emulator</p>
+        <p style={{ color: "rgba(255,255,255,0.2)", fontSize: 9, letterSpacing: 0.5, margin: 0 }}>DualShock 2 — Interactive Emulator</p>
       </div>
 
       {/* Controller Layout */}
-      <div style={{ width: "100%", maxWidth: 640, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ width: "100%", maxWidth: "100%", display: "flex", flexDirection: "column", gap: 8, flexShrink: 1, overflow: "hidden" }}>
         {/* Row 1 — Analog / Center / Face */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 10, alignItems: "stretch" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 8, alignItems: "stretch", minHeight: 0 }}>
           {/* Analog Stick */}
-          <Panel style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+          <Panel style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative" }}>
             <SectionLabel>Analog</SectionLabel>
             <AnalogStick
               id="ls"
@@ -406,19 +425,74 @@ export default function App() {
               release={release}
               onMove={(x, y) => setJoystick({ x: -x, y: -y })}
             />
+            {/* PWM Controls */}
+            <div style={{ display: "flex", gap: 4, marginTop: 6, alignItems: "center" }}>
+              <button
+                onClick={decreasePwm}
+                style={{
+                  width: 24, height: 24,
+                  borderRadius: 4,
+                  background: "rgba(248,113,113,0.15)",
+                  border: "1px solid rgba(248,113,113,0.3)",
+                  color: "#f87171",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                  fontSize: 10,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "all 0.1s",
+                  padding: 0,
+                }}
+                onMouseDown={e => e.currentTarget.style.transform = "scale(0.9)"}
+                onMouseUp={e => e.currentTarget.style.transform = "scale(1)"}
+                title="Decrease PWM"
+              >
+                −
+              </button>
+              <div style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: "#60a5fa",
+                fontFamily: "monospace",
+                minWidth: 32,
+                textAlign: "center",
+              }}>
+                {pwmSpeed}
+              </div>
+              <button
+                onClick={increasePwm}
+                style={{
+                  width: 24, height: 24,
+                  borderRadius: 4,
+                  background: "rgba(74,222,128,0.15)",
+                  border: "1px solid rgba(74,222,128,0.3)",
+                  color: "#4ade80",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                  fontSize: 10,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "all 0.1s",
+                  padding: 0,
+                }}
+                onMouseDown={e => e.currentTarget.style.transform = "scale(0.9)"}
+                onMouseUp={e => e.currentTarget.style.transform = "scale(1)"}
+                title="Increase PWM"
+              >
+                +
+              </button>
+            </div>
           </Panel>
 
           {/* Center */}
-          <Panel style={{ padding: "16px 14px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
-            <div style={{ color: "rgba(255,255,255,0.15)", fontSize: 10, fontWeight: 700, letterSpacing: 2, textAlign: "center", lineHeight: 1.2 }}>
-              SONY<br /><span style={{ fontSize: 7, letterSpacing: 1 }}>PlayStation</span>
+          <Panel style={{ padding: "10px 8px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
+            <div style={{ color: "rgba(255,255,255,0.15)", fontSize: 8, fontWeight: 700, letterSpacing: 1.5, textAlign: "center", lineHeight: 1.2 }}>
+              SONY<br /><span style={{ fontSize: 6, letterSpacing: 1 }}>PlayStation</span>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "center" }}>
               <CenterBtn id="select" label="SELECT" />
               {/* Analog LED */}
               <button
                 style={{
-                  width: 28, height: 28, borderRadius: "50%",
+                  width: 22, height: 22, borderRadius: "50%",
                   background: pressed.has("analog") ? "rgba(248,113,113,0.2)" : "rgba(255,255,255,0.03)",
                   border: `1.5px solid ${pressed.has("analog") ? "#f87171" : "rgba(255,255,255,0.1)"}`,
                   cursor: "pointer",
@@ -433,7 +507,7 @@ export default function App() {
                 onTouchEnd={e => { e.preventDefault(); release("analog"); }}
               >
                 <div style={{
-                  width: 10, height: 10, borderRadius: "50%",
+                  width: 8, height: 8, borderRadius: "50%",
                   background: pressed.has("analog") ? "#f87171" : "#991b1b",
                   boxShadow: pressed.has("analog") ? "0 0 10px #f87171, 0 0 4px #f87171" : "none",
                   transition: "all 0.1s",
@@ -446,11 +520,11 @@ export default function App() {
           {/* Face Buttons */}
           <Panel>
             <SectionLabel>Face Buttons</SectionLabel>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
               <FaceBtn id="triangle" pressed={pressed} press={press} release={release} />
-              <div style={{ display: "flex", gap: 4 }}>
+              <div style={{ display: "flex", gap: 2 }}>
                 <FaceBtn id="square" pressed={pressed} press={press} release={release} />
-                <div style={{ width: 56, height: 56 }} />
+                <div style={{ width: 44, height: 44 }} />
                 <FaceBtn id="circle" pressed={pressed} press={press} release={release} />
               </div>
               <FaceBtn id="cross" pressed={pressed} press={press} release={release} />
@@ -459,8 +533,8 @@ export default function App() {
         </div>
 
         {/* Keyboard hint */}
-        <div style={{ textAlign: "center" }}>
-          <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 10, letterSpacing: 1 }}>
+        <div style={{ textAlign: "center", flexShrink: 0 }}>
+          <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 8, letterSpacing: 0.5 }}>
             Keyboard: Z=✕ &nbsp;·&nbsp; X=○ &nbsp;·&nbsp; A=□ &nbsp;·&nbsp; S=△
           </span>
         </div>

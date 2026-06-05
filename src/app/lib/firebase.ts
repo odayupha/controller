@@ -24,3 +24,12 @@ export async function sendControl(payload: ControlPayload) {
     timestamp: serverTimestamp(),
   });
 }
+
+// Initialize zones in database
+export async function initializeZones() {
+  await update(controlRef, {
+    zone_triangle_safe: null,
+    zone_circle_danger: null,
+    pwm_speed: 0,
+  });
+}
