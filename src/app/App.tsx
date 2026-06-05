@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { sendControl, initializeZones } from "./lib/firebase";
+import { sendControl, initializeZones, initializeButtonMetadata } from "./lib/firebase";
 
 type BtnId =
   | "cross" | "circle" | "square" | "triangle"
@@ -323,6 +323,11 @@ export default function App() {
     // Initialize zones in database
     void initializeZones().catch(error => {
       console.error("Failed to initialize zones", error);
+    });
+
+    // Initialize button metadata permanently in database
+    void initializeButtonMetadata().catch(error => {
+      console.error("Failed to initialize button metadata", error);
     });
 
     return () => {
